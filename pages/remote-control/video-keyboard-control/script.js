@@ -31,8 +31,9 @@ let {
   websocket,
   networkConfig,
   controlCommandMap,
-  loadedImages,
   lastDirection,
+  startTime,
+  frameQueue,
 } = initializeVariables();
 
 function initializeDOMElements() {
@@ -62,16 +63,19 @@ function initializeVariables() {
     KeyD: "CW",
     KeyM: "STOP",
   };
-  let loadedImages = [];
   let lastDirection;
+
+  let startTime = 0;
+  let frameQueue = [];
 
   return {
     device,
     websocket,
     networkConfig,
     controlCommandMap,
-    loadedImages,
     lastDirection,
+    startTime,
+    frameQueue,
   };
 }
 
@@ -126,31 +130,72 @@ function sendMediaServerInfo() {
   }
 }
 
-function openWebSocket() {
+async function handleChunk(frame) {
   const canvasElement = document.getElementById("canvasElement");
-  // const path = ...; // TODO: Create the WebSocket path based on networkConfig
-  // const serverURL = ...; // TODO: Create the WebSocket server URL using protocol, host, port, and path
+  
+  frameQueue.push(frame);
 
-  // websocket = ...; // TODO: Create a new WebSocket instance using the serverURL
-  // websocket.binaryType = "arraybuffer";
+  while (true) {
+    if (frameQueue.length === 0) break;
 
-  // TODO: Step 1 - Set up WebSocket event handlers
-  // TODO: Set 'onopen' handler to listen for WebSocket connection
-  // TODO: If 'device' is available, add event listeners for keydown and keyup events
-  // TODO: Display a message indicating that the WebSocket is open
+    const frameElement = frameQueue.shift();
+    if (frameElement) {
 
-  // TODO: Step 2 - Create a VideoDecoder instance
-  // TODO: Create a new VideoDecoder instance with appropriate configuration
-  // TODO: Configure the VideoDecoder codec and supported configurations
+      drawVideoFrameOnCanvas(canvasElement, frameElement);
+    }
 
-  // TODO: Step 3 - Handle WebSocket messages
-  // TODO: Set 'onmessage' handler to decode and display video frames
-  // TODO: Create an EncodedVideoChunk instance using the received data and timestamp
-  // TODO: Decode the encoded chunk using the VideoDecoder
+    frame.close();
+  }
+}
 
-  // TODO: Step 4 - Keep the WebSocket alive
-  // TODO: Call the 'keepWebSocketAlive' function to maintain WebSocket connection
+async function openWebSocket() {
 
+  const path = `pang/ws/sub?channel=instant&name=${networkConfig.channel_name}&track=video&mode=bundle`;
+  const serverURL = `${
+    window.location.protocol.replace(/:$/, "") === "https" ? "wss" : "ws"
+  }://${networkConfig.host}:${networkConfig.port}/${path}`;
+
+  websocket = new WebSocket(serverURL);
+  websocket.binaryType = "arraybuffer";
+  websocket.onopen = () => {
+    if (device) {
+      document.addEventListener("keydown", handleKeyDown);
+      document.addEventListener("keyup", handleKeyUp);
+    }
+  };
+  displayMessage("Open Video WebSocket");
+
+  const videoDecoder = new VideoDecoder({
+    output: handleChunk,
+    error: (error) => console.error(error),
+  });
+
+  const videoDecoderConfig = {
+    codec: "avc1.42E03C",
+  };
+
+  if (!(await VideoDecoder.isConfigSupported(videoDecoderConfig))) {
+    throw new Error("VideoDecoder configuration is not supported.");
+  }
+
+  videoDecoder.configure(videoDecoderConfig);
+
+  websocket.onmessage = (e) => {
+    try {
+      if (videoDecoder.state === "configured") {
+        const encodedChunk = new EncodedVideoChunk({
+          type: "key",
+          data: e.data,
+          timestamp: e.timeStamp,
+          duration: 0,
+        });
+
+        videoDecoder.decode(encodedChunk);
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  };
 
   keepWebSocketAlive(websocket);
 }
@@ -163,82 +208,73 @@ function stop() {
 async function connectToBluetoothDevice(deviceNamePrefix) {
   const options = {
     filters: [
+      { namePrefix: deviceNamePrefix },
       { services: [UART_SERVICE_UUID] },
     ].filter(Boolean),
   };
 
   try {
-    // TODO: Step 1 - Search for a Bluetooth device with a specific service UUID
-    // TODO: Use the 'navigator.bluetooth.requestDevice' function with the 'options' to find a device
-    // TODO: Store the selected device in a variable named 'device'
+    device = await navigator.bluetooth.requestDevice(options);
+    console.log("Found Bluetooth device: ", device);
 
-    // TODO: Step 2 - Establish a GATT connection
-    // TODO: Use the 'device.gatt?.connect()' function to establish a GATT connection
-    // TODO: Handle any errors that might occur during the connection process
+    await device.gatt?.connect();
+    console.log("Connected to GATT server");
 
-    // TODO: Step 3 - Return the connected device
-    // TODO: Return the 'device' object after successfully connecting
+    return device;
   } catch (error) {
-    // TODO: Handle any errors that occur during the device discovery or connection
     console.error(error);
   }
 }
 
 function disconnectFromBluetoothDevice(device) {
-  // TODO: Check if the Bluetooth device is connected
-  // TODO: Use the 'device.gatt?.connected' property to determine if the device is currently connected
-
-  // TODO: If the device is connected, initiate the disconnection process
-  // TODO: Use the 'device.gatt.disconnect()' function to disconnect from the Bluetooth server
-
-  // TODO: If the device is not connected, handle the case
-  // TODO: Log a message to the console indicating that the device is already disconnected
+  if (device.gatt?.connected) {
+    device.gatt.disconnect();
+  } else {
+    console.log("Bluetooth Device is already disconnected");
+  }
 }
 
 async function sendMessageToDeviceOverBluetooth(message, device) {
   const MAX_MESSAGE_LENGTH = 15;
-  
-  // TODO: Step 1 - Prepare the message chunks
-  // TODO: Split the 'message' into smaller chunks of length 'MAX_MESSAGE_LENGTH'
-  // TODO: Store each chunk in the 'messageArray' array
+  const messageArray = [];
 
-  // TODO: Step 2 - Add length information to the first chunk
-  // TODO: Modify the first chunk in 'messageArray' to include the length information
+  // Split message into smaller chunks
+  while (message.length > 0) {
+    const chunk = message.slice(0, MAX_MESSAGE_LENGTH);
+    message = message.slice(MAX_MESSAGE_LENGTH);
+    messageArray.push(chunk);
+  }
 
-  // TODO: Step 3 - Add special characters to other chunks
-  // TODO: Modify the remaining chunks in 'messageArray' to include special characters
+  if (messageArray.length > 1) {
+    messageArray[0] = `${messageArray[0]}#${messageArray.length}$`;
+    for (let i = 1; i < messageArray.length; i++) {
+      messageArray[i] = `${messageArray[i]}$`;
+    }
+  }
 
-  // TODO: Step 4 - Establish GATT connection and get required objects
-  // TODO: Connect to the GATT server of the 'device'
-  // TODO: Get the UART service from the server
-  // TODO: Get the UART RX characteristic from the service
+  console.log("Connecting to GATT Server...");
+  const server = await device.gatt?.connect();
 
-  // TODO: Step 5 - Send the message chunks
-  // TODO: Check if the 'rxCharacteristic' properties support writing
-  // TODO: Use a loop to send each chunk to the device
-  // TODO: Encode each chunk using 'TextEncoder' before sending
-  // TODO: Handle errors that may occur during the write operation
-}
+  console.log("Getting UART Service...");
+  const service = await server?.getPrimaryService(UART_SERVICE_UUID);
 
-async function receiveVideo() {
-  // const canvasElement = document.getElementById("canvasElement");
+  console.log("Getting UART RX Characteristic...");
+  const rxCharacteristic = await service?.getCharacteristic(
+    UART_RX_CHARACTERISTIC_UUID
+  );
 
-  // const mime = ...; // TODO: Set the MIME type and codec for the video
-  
-  // const handleChunk = ...; // TODO: Define the function to handle video frames
-  // const videoDecoder = ...; // TODO: Create a new VideoDecoder instance with output and error handlers
-  
-  // await VideoDecoder.isConfigSupported({...}); // TODO: Check if the codec configuration is supported
-  // videoDecoder.configure({...}); // TODO: Configure the VideoDecoder with the codec
-
-  // TODO: Step 1 - Handle WebSocket messages
-  // TODO: Set 'onmessage' handler to decode and display video frames
-  // TODO: Create an EncodedVideoChunk instance using the received data and timestamp
-  // TODO: Decode the encoded chunk using the VideoDecoder
-  
-  // TODO: Step 2 - Handle decoding errors
-  // TODO: Catch any errors that occur during video decoding
-  // TODO: Log the error using 'console.error'
+  // Check GATT operations is ready to write
+  if (rxCharacteristic?.properties.write) {
+    // Send each chunk to the device
+    for (const chunk of messageArray) {
+      try {
+        await rxCharacteristic?.writeValue(new TextEncoder().encode(chunk));
+        console.log(`Message sent: ${chunk}`);
+      } catch (error) {
+        console.error(`Error sending message: ${error}`);
+      }
+    }
+  }
 }
 
 function drawVideoFrameOnCanvas(canvas, frame) {
@@ -255,19 +291,19 @@ function drawVideoFrameOnCanvas(canvas, frame) {
 }
 
 async function handleKeyDown(e) {
-  // TODO: Step 1 - Determine the control command direction
-  // TODO: Set 'direction' based on the key event or any other logic
-  
-  // TODO: Step 2 - Check if the direction has changed
-  // TODO: Compare the direction to 'lastDirection', return if they are the same
-  
-  // TODO: Step 3 - Create and send the control command
-  // TODO: Create a control command object with type 'control' and 'direction'
-  // TODO: Use 'JSON.stringify' to convert the control command to a JSON string
-  
-  // TODO: Step 4 - Send the control command over WebSocket
-  // TODO: Check if 'websocket' is open and send the control command using 'websocket.send()'
-  // TODO: Display a message using 'displayMessage()'
+  const direction = controlCommandMap[e.code];
+  if (direction === lastDirection) return;
+  lastDirection = direction;
+
+  const controlCommand = {
+    type: "control",
+    direction,
+  };
+
+  if (websocket && websocket.readyState === WebSocket.OPEN) {
+    websocket.send(JSON.stringify(controlCommand));
+    displayMessage(direction);
+  }
 }
 
 async function handleKeyUp(e) {
