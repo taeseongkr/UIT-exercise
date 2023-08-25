@@ -66,9 +66,7 @@ function initializeVariables() {
   let runningMode = "IMAGE";
   let controlCommandMap = {
     Closed_Fist: "N",
-    Open_Palm: "W",
-    Pointing_Up: "S",
-    Thumb_Up: "E",
+   //TODO: Define more gesture by yourself
     Victory: "STOP",
   };
   let lastDirection;
@@ -181,30 +179,42 @@ async function createGestureRecognizer() {
 }
 
 async function detectHandGestureFromVideo(gestureRecognizer, stream) {
-  // TODO: Step 1 - Check if 'gestureRecognizer' exists
-  // TODO: Return early from the function if 'gestureRecognizer' is not provided
+  if (!gestureRecognizer) return;
 
-  // TODO: Step 2 - Get the video track from the 'stream'
-  // TODO: Get the first video track from 'stream.getVideoTracks()[0]'
-  
-  // TODO: Step 3 - Capture frames and recognize gestures
-  // TODO: Create an 'ImageCapture' object using the video track
-  // TODO: Enter a loop to continuously capture frames
-  // TODO: Use 'capturedImage.grabFrame()' to capture a frame and process it
-  // TODO: Extract detected gestures from 'gestureRecognizer.recognize(imageBitmap)'
-  
-  // TODO: Step 4 - Handle recognized gestures
-  // TODO: Check if there are recognized gestures ('gestures[0]')
-  // TODO: Extract the gesture category name ('gestures[0][0].categoryName')
-  // TODO: Check if the gesture is in 'controlCommandMap'
-  // TODO: Retrieve the corresponding control command direction from 'controlCommandMap'
-  
-  // TODO: Step 5 - Send control command over WebSocket
-  // TODO: Compare the direction to 'lastDirection' and update if different
-  // TODO: Create a control command object with type 'control' and 'direction'
-  // TODO: Check if 'websocket' is open and send the control command using 'websocket.send()'
-  // TODO: Display a message indicating the sent command using 'displayMessage()'
+  const videoTrack = stream.getVideoTracks()[0];
+  const capturedImage = new ImageCapture(videoTrack);
+  while (true) {
+    await capturedImage.grabFrame().then((imageBitmap) => {
+      const detectedGestures = gestureRecognizer.recognize(imageBitmap);
 
+      const {
+        landmarks,
+        worldLandmarks,
+        handednesses,
+        gestures,
+      } = detectedGestures;
+
+      if (gestures[0]) {
+        const gesture = gestures[0][0].categoryName;
+
+        if (Object.keys(controlCommandMap).includes(gesture)) {
+          const direction = controlCommandMap[gesture];
+          if (direction !== lastDirection) {
+            lastDirection = direction;
+
+            const controlCommand = {
+              type: "control",
+              direction,
+            };
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+              websocket.send(JSON.stringify(controlCommand));
+              displayMessage(`Send '${direction}' command`);
+            }
+          }
+        }
+      }
+    });
+  }
 }
 
 async function connectToBluetoothDevice(deviceNamePrefix) {
